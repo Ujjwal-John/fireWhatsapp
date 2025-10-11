@@ -146,7 +146,7 @@ app.post("/webhook", async (req, res) => {
 
           // 4️⃣ Save Cloudinary URL to Firestore (match by phone number)
           const querySnapshot = await db
-            .collection("tournaments")
+            .collection("teamRegistrations")
             .where("phoneNumber", "==", phoneNumber)
             .get();
 
