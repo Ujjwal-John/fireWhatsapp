@@ -190,6 +190,106 @@ app.get("/api/messages", (req, res) => {
   res.status(200).json({ messages: receivedMessagesStore });
 });
 
+
+
+// ================================================================
+// ✅ VERIFICATION MESSAGE ROUTES (TEMPLATE-BASED)
+// ================================================================
+
+
+
+const WHATSAPP_API_URL =
+  process.env.WHATSAPP_API_URL || "https://graph.facebook.com/v20.0";
+const WHATSAPP_PHONE_ID = process.env.PHONE_NUMBER_ID; // e.g., 123456789012345
+const WHATSAPP_TOKEN = process.env.WHATSAPP_TOKEN; // from Meta Developer
+
+// 🧩 Common function to send WhatsApp Template message
+async function sendTemplateMessage(to, templateName) {
+  const url = `${WHATSAPP_API_URL}/${WHATSAPP_PHONE_ID}/messages`;
+
+  const payload = {
+    messaging_product: "whatsapp",
+    to,
+    type: "template",
+    template: {
+      name: templateName, // must exactly match approved template name (case-sensitive)
+      language: { code: "en" }, // use "en" if your template language is English
+    },
+  };
+
+  try {
+    const response = await axios.post(url, payload, {
+      headers: {
+        Authorization: `Bearer ${WHATSAPP_TOKEN}`,
+        "Content-Type": "application/json",
+      },
+    });
+    console.log(`✅ Template message sent: ${templateName} → ${to}`);
+    return response.data;
+  } catch (error) {
+    console.error(
+      "❌ WhatsApp template send error:",
+      error.response?.data || error.message
+    );
+    throw new Error(
+      JSON.stringify(error.response?.data || error.message)
+    );
+  }
+}
+
+// 🟢 Helper to handle verify routes
+async function handleVerify(req, res, statusText) {
+  try {
+    const { phoneNumber } = req.body;
+    if (!phoneNumber)
+      return res.status(400).json({ error: "Phone number is required" });
+
+    console.log(`📨 Sending WhatsApp message to: ${phoneNumber}`);
+
+    const result = await sendTemplateMessage(phoneNumber, statusText);
+
+    console.log("✅ WhatsApp API Response:", result);
+
+    // Optional: Firestore update (uncomment if needed)
+    // const snapshot = await db.collection("teamRegistrations")
+    //   .where("phoneNumber", "==", phoneNumber.slice(-10))
+    //   .get();
+    // if (!snapshot.empty) {
+    //   await snapshot.docs[0].ref.update({ verificationStatus: statusText });
+    // }
+
+    res.status(200).json({
+      success: true,
+      status: statusText,
+      message: `Message sent successfully: ${statusText}`,
+      result,
+    });
+  } catch (error) {
+    console.error("❌ Error sending verification message:", error.message);
+    res.status(500).json({
+      error: "Failed to send WhatsApp message",
+      details: error.message,
+    });
+  }
+}
+
+// ✅ Verified
+app.post("/api/verify/verified", (req, res) =>
+  handleVerify(req, res, "verified")
+);
+
+// ✅ Not Verified
+app.post("/api/verify/not-verified", (req, res) =>
+  handleVerify(req, res, "not_verfied")
+);
+
+// ✅ Pending
+app.post("/api/verify/pending", (req, res) =>
+  handleVerify(req, res, "pending")
+);
+
+
+
 // ================================================================
 // ✅ START SERVER
 // ================================================================
