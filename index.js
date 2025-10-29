@@ -40,15 +40,7 @@ admin.initializeApp({
 const db = admin.firestore(); // Firestore reference
 
 // 🔹 Enable CORS
-app.use(cors({
-  origin: [
-    "http://127.0.0.1:5500",
-    "http://localhost:5501",
-    "https://colabesports.in",
-  ],
-  methods: ["GET", "POST", "OPTIONS"],
-  allowedHeaders: ["Content-Type", "Authorization"],
-}));
+app.use(cors());
 
 app.use(express.json());
 
