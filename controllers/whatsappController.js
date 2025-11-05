@@ -28,7 +28,7 @@ export const sendWhatsAppMessage = async (req, res) => {
           {
             type: "image",
             image: {
-              link: "https://res.cloudinary.com/dpjflcgx5/image/upload/v1762169301/WhatsApp_Image_2025-11-03_at_4.51.15_PM_sa5sqw.jpg" // 👈 Public URL of your image
+              link: "https://res.cloudinary.com/dpjflcgx5/image/upload/v1762344220/1.2_1_pe3t4v.jpg" // 👈 Public URL of your image
             }
           }
         ]
