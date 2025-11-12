@@ -28,33 +28,36 @@ cloudinary.config({
   api_secret: process.env.CLOUDINARY_API_SECRET,
 });
 
-// Parse the env variable
+// 🔹 Firebase Admin Initialization
 const serviceAccount = JSON.parse(process.env.FIREBASE_SERVICE_ACCOUNT);
-
 // Replace escaped line breaks with real line breaks
 serviceAccount.private_key = serviceAccount.private_key.replace(/\\n/g, "\n");
+
 admin.initializeApp({
   credential: admin.credential.cert(serviceAccount),
 });
 
-const db = admin.firestore(); // Firestore reference
+const db = admin.firestore();
 
-// 🔹 Enable CORS
+// 🔹 Express middleware
 app.use(cors());
-
 app.use(express.json());
 
-// In-memory store (optional)
+// 🔹 In-memory store (optional, for quick debug)
 let receivedMessagesStore = [];
 
-// 🔹 Send WhatsApp message route
+// ================================================================
+// ✅ REGISTRATION BUTTON TRIGGER
+// ================================================================
 app.post("/api/send-whatsapp", sendWhatsAppMessage);
 
-// Root route
-app.get("/", (req, res) => res.send("✅ WhatsApp API + Firebase connected successfully!"));
+// Root test route
+app.get("/", (req, res) =>
+  res.send("✅ WhatsApp API + Firebase connected successfully!")
+);
 
 // ================================================================
-// ✅ STEP 1: VERIFY WEBHOOK
+/** ✅ STEP 1: VERIFY WEBHOOK */
 // ================================================================
 app.get("/webhook", (req, res) => {
   const VERIFY_TOKEN = "my_verify_token";
@@ -74,7 +77,15 @@ app.get("/webhook", (req, res) => {
 });
 
 // ================================================================
-// ✅ STEP 2: RECEIVE MESSAGES
+// ✅ ENV for WhatsApp API
+// ================================================================
+const WHATSAPP_API_URL =
+  process.env.WHATSAPP_API_URL || "https://graph.facebook.com/v20.0";
+const WHATSAPP_PHONE_ID = process.env.PHONE_NUMBER_ID;
+const WHATSAPP_TOKEN = process.env.WHATSAPP_TOKEN;
+
+// ================================================================
+// ✅ STEP 2: RECEIVE INCOMING WHATSAPP MESSAGES
 // ================================================================
 app.post("/webhook", async (req, res) => {
   try {
@@ -84,48 +95,64 @@ app.post("/webhook", async (req, res) => {
       return res.status(404).json({ error: "Invalid payload" });
     }
 
-    const messages = body.entry[0].changes[0]?.value.messages;
+    const change = body.entry?.[0]?.changes?.[0]?.value;
+    const messages = change?.messages;
     if (!messages) return res.status(200).json({ status: "no messages" });
 
     for (const msg of messages) {
-      const from = msg.from; // WhatsApp phone number (e.g., '919209444201')
-      const phoneNumber = from.slice(-10); // extract 10 digits (e.g., '9209444201')
+      const from = msg.from;               // e.g., 91987xxxxxxx
+      const shortPhone = from.slice(-10);  // use 10-digit doc id
       const timestamp = new Date().toISOString();
 
-      // ✅ TEXT MESSAGE
+      // ✅ TEXT MESSAGE: store in whatsappChats
       if (msg.text?.body) {
         const text = msg.text.body;
         console.log(`📩 Text from ${from}: ${text}`);
         receivedMessagesStore.push({ from, text, timestamp });
+
+        // Save text message to whatsappChats ONLY
+        await db
+          .collection("whatsappChats")
+          .doc(shortPhone)
+          .collection("messages")
+          .add({
+            from: "user",
+            text,
+            timestamp,
+            read: false,
+            type: "text",
+          });
+
+        await db
+          .collection("whatsappChats")
+          .doc(shortPhone)
+          .set({ lastUpdated: timestamp }, { merge: true });
       }
 
-      // ✅ IMAGE MESSAGE
+      // ✅ IMAGE MESSAGE: DO NOT store in whatsappChats; save to teamRegistrations only
       if (msg.image?.id) {
         const mediaId = msg.image.id;
-        console.log(`🖼 Received image from ${phoneNumber} (Media ID: ${mediaId})`);
-
+        console.log(`🖼 Received image from ${shortPhone} (Media ID: ${mediaId})`);
         try {
-          // 1️⃣ Get media URL from WhatsApp API
+          // 1) Get media URL
           const mediaRes = await axios.get(
             `https://graph.facebook.com/v20.0/${mediaId}`,
             {
-              headers: { Authorization: `Bearer ${process.env.WHATSAPP_TOKEN}` },
+              headers: { Authorization: `Bearer ${WHATSAPP_TOKEN}` },
             }
           );
           const mediaUrl = mediaRes.data.url;
 
-          // 2️⃣ Download the image as buffer
+          // 2) Download the image
           const imageResponse = await axios.get(mediaUrl, {
             responseType: "arraybuffer",
-            headers: { Authorization: `Bearer ${process.env.WHATSAPP_TOKEN}` },
+            headers: { Authorization: `Bearer ${WHATSAPP_TOKEN}` },
           });
 
-          // 3️⃣ Upload to Cloudinary (folder: whatsapp_media/{phoneNumber})
+          // 3) Upload to Cloudinary
           const uploadedImage = await new Promise((resolve, reject) => {
             const uploadStream = cloudinary.uploader.upload_stream(
-              {
-                folder: `whatsapp_media/${phoneNumber}`,
-              },
+              { folder: `whatsapp_media/${shortPhone}` },
               (error, result) => {
                 if (error) reject(error);
                 else resolve(result);
@@ -136,24 +163,29 @@ app.post("/webhook", async (req, res) => {
 
           console.log(`✅ Uploaded to Cloudinary: ${uploadedImage.secure_url}`);
 
-          // 4️⃣ Save Cloudinary URL to Firestore (match by phone number)
+          // 4) Save URL into teamRegistrations only (no whatsappChats write)
           const querySnapshot = await db
             .collection("teamRegistrations")
-            .where("phoneNumber", "==", phoneNumber)
+            .where("phoneNumber", "==", shortPhone)
             .get();
 
           if (!querySnapshot.empty) {
             const docRef = querySnapshot.docs[0].ref;
             await docRef.update({
-              images: admin.firestore.FieldValue.arrayUnion(uploadedImage.secure_url),
+              images: admin.firestore.FieldValue.arrayUnion(
+                uploadedImage.secure_url
+              ),
               verificationStatus: "image_uploaded",
+              updatedAt: timestamp,
             });
-
-            console.log(`🔥 Image URL saved in Firebase for ${phoneNumber}`);
+            console.log(`🔥 Image URL saved in teamRegistrations for ${shortPhone}`);
           } else {
-            console.log(`⚠️ No matching record found for ${phoneNumber} in Firestore.`);
+            console.log(
+              `⚠️ No matching teamRegistrations record for ${shortPhone}.`
+            );
           }
 
+          // (Optional) Keep a debug copy in memory, but NOT in whatsappChats
           receivedMessagesStore.push({
             from,
             text: `[Image] ${uploadedImage.secure_url}`,
@@ -161,9 +193,8 @@ app.post("/webhook", async (req, res) => {
             mediaId,
             cloudinary_id: uploadedImage.public_id,
           });
-
         } catch (err) {
-          console.error("❌ Error handling image:", err.message);
+          console.error("❌ Error handling image:", err?.response?.data || err.message);
         }
       }
     }
@@ -176,36 +207,24 @@ app.post("/webhook", async (req, res) => {
 });
 
 // ================================================================
-// ✅ STEP 3: GET ALL RECEIVED MESSAGES
+// ✅ GET ALL RECEIVED MESSAGES (DEBUGGING)
 // ================================================================
 app.get("/api/messages", (req, res) => {
   res.status(200).json({ messages: receivedMessagesStore });
 });
 
-
-
 // ================================================================
-// ✅ VERIFICATION MESSAGE ROUTES (TEMPLATE-BASED)
+// ✅ TEMPLATE MESSAGE HELPERS
 // ================================================================
-
-
-
-const WHATSAPP_API_URL =
-  process.env.WHATSAPP_API_URL || "https://graph.facebook.com/v20.0";
-const WHATSAPP_PHONE_ID = process.env.PHONE_NUMBER_ID; // e.g., 123456789012345
-const WHATSAPP_TOKEN = process.env.WHATSAPP_TOKEN; // from Meta Developer
-
-// 🧩 Common function to send WhatsApp Template message
 async function sendTemplateMessage(to, templateName) {
   const url = `${WHATSAPP_API_URL}/${WHATSAPP_PHONE_ID}/messages`;
-
   const payload = {
     messaging_product: "whatsapp",
     to,
     type: "template",
     template: {
-      name: templateName, // must exactly match approved template name (case-sensitive)
-      language: { code: "en" }, // use "en" if your template language is English
+      name: templateName,
+      language: { code: "en" },
     },
   };
 
@@ -223,13 +242,10 @@ async function sendTemplateMessage(to, templateName) {
       "❌ WhatsApp template send error:",
       error.response?.data || error.message
     );
-    throw new Error(
-      JSON.stringify(error.response?.data || error.message)
-    );
+    throw new Error(JSON.stringify(error.response?.data || error.message));
   }
 }
 
-// 🟢 Helper to handle verify routes
 async function handleVerify(req, res, statusText) {
   try {
     const { phoneNumber } = req.body;
@@ -237,18 +253,7 @@ async function handleVerify(req, res, statusText) {
       return res.status(400).json({ error: "Phone number is required" });
 
     console.log(`📨 Sending WhatsApp message to: ${phoneNumber}`);
-
     const result = await sendTemplateMessage(phoneNumber, statusText);
-
-    console.log("✅ WhatsApp API Response:", result);
-
-    // Optional: Firestore update (uncomment if needed)
-    // const snapshot = await db.collection("teamRegistrations")
-    //   .where("phoneNumber", "==", phoneNumber.slice(-10))
-    //   .get();
-    // if (!snapshot.empty) {
-    //   await snapshot.docs[0].ref.update({ verificationStatus: statusText });
-    // }
 
     res.status(200).json({
       success: true,
@@ -265,27 +270,117 @@ async function handleVerify(req, res, statusText) {
   }
 }
 
-// ✅ Verified
+// ✅ Verification routes
 app.post("/api/verify/verified", (req, res) =>
   handleVerify(req, res, "verified")
 );
-
-// ✅ Not Verified
 app.post("/api/verify/not-verified", (req, res) =>
-  handleVerify(req, res, "not_verfied")
+  handleVerify(req, res, "not_verified")
 );
-
-// ✅ Pending
 app.post("/api/verify/pending", (req, res) =>
   handleVerify(req, res, "pending")
 );
 
+// ================================================================
+// ✅ ADMIN → USER CHAT API (SEND TEXT MESSAGE ONLY)
+//     - Sends via WhatsApp API
+//     - Stores TEXT in whatsappChats (no images here)
+// ================================================================
+app.post("/api/chat/send", async (req, res) => {
+  try {
+    const { phoneNumber, message } = req.body;
+    if (!phoneNumber || !message)
+      return res
+        .status(400)
+        .json({ error: "phoneNumber and message are required" });
 
+    // Send via WhatsApp
+    const url = `${WHATSAPP_API_URL}/${WHATSAPP_PHONE_ID}/messages`;
+    const payload = {
+      messaging_product: "whatsapp",
+      to: phoneNumber, // keep full number with country code for Meta
+      type: "text",
+      text: { body: message },
+    };
+
+    await axios.post(url, payload, {
+      headers: {
+        Authorization: `Bearer ${WHATSAPP_TOKEN}`,
+        "Content-Type": "application/json",
+      },
+    });
+
+    // Save TEXT to whatsappChats ONLY
+    const timestamp = new Date().toISOString();
+    const shortPhone = phoneNumber.slice(-10);
+
+    await db
+      .collection("whatsappChats")
+      .doc(shortPhone)
+      .collection("messages")
+      .add({
+        from: "admin",
+        text: message,
+        timestamp,
+        read: false,
+        type: "text",
+      });
+
+    await db
+      .collection("whatsappChats")
+      .doc(shortPhone)
+      .set({ lastUpdated: timestamp }, { merge: true });
+
+    res
+      .status(200)
+      .json({ success: true, message: "Message sent successfully" });
+  } catch (err) {
+    console.error("❌ Admin send error:", err.response?.data || err.message);
+    res.status(500).json({ error: "Failed to send WhatsApp message" });
+  }
+});
+
+// ================================================================
+// ✅ FETCH LAST 10 CHAT MESSAGES (TEXT-ONLY HISTORY)
+//     - Reads from whatsappChats (since we store only text there)
+// ================================================================
+app.get("/api/chat/history/:phoneNumber", async (req, res) => {
+  try {
+    const { phoneNumber } = req.params;
+    const shortPhone = phoneNumber.slice(-10);
+
+    // Check if the chat document exists
+    const chatDoc = await db
+      .collection("whatsappChats")
+      .doc(shortPhone)
+      .get();
+
+    // If no chat document exists, return empty messages array (not 404)
+    if (!chatDoc.exists) {
+      console.log(`ℹ️ No chat history found for ${shortPhone}, returning empty array`);
+      return res.status(200).json({ phoneNumber: shortPhone, messages: [] });
+    }
+
+    const messagesSnapshot = await db
+      .collection("whatsappChats")
+      .doc(shortPhone)
+      .collection("messages")
+      .orderBy("timestamp", "desc")
+      .limit(10)
+      .get();
+
+    const messages = messagesSnapshot.docs.map((doc) => doc.data()).reverse();
+    res.status(200).json({ phoneNumber: shortPhone, messages });
+  } catch (err) {
+    console.error("❌ Error fetching chat history:", err.message);
+    res.status(500).json({ error: "Failed to fetch chat history" });
+  }
+});
 
 // ================================================================
 // ✅ START SERVER
 // ================================================================
 const PORT = process.env.PORT || 5000;
 app.listen(PORT, "0.0.0.0", () =>
-  console.log(`🚀 Server running on port http://localhost:${PORT}`)
+  console.log(`🚀 Server running on http://localhost:${PORT}`)
 );
